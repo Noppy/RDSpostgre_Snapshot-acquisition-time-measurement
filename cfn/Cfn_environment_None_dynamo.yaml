@@ -1,0 +1,482 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploy environment for Aurora(Posgresql) snapshot acquisition time mesurment
+#----------------------------------------------
+Parameters:
+  #------------------
+  InternetAccess:
+    Description: (required)If this vpc is required internet access, InternetAccess is true.
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: Must specify true or false.
+  #------------------
+  VpcInternalDnsName: 
+    Type: String
+    AllowedPattern: "^([a-z0-9]+(-[a-z0-9]+)*\\.?)+\\.$"
+    Default: aurora-test-2.
+    ConstraintDescription: You can use letters (abc), numbers (123) and dashes/hyphens, and the last character is '.'.
+  VpcName:
+    Description: Name for the VPC
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9=-@+?[?]?<?>._]*"
+    Default: AuroraTestVPC
+    ConstraintDescription: Can contain only ASCII characters.
+  VpcCidr:
+    Description: CIDR Block for the  VPC
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 10.1.0.0/16
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be like 10.1.0.0/16
+  DnsSupport:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  DnsHostnames:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  #---
+  Subnet1Name:
+    Description: Name for the Public Subnet 1
+    Type: String
+    Default: PublicSub1
+    AllowedPattern: "[a-zA-Z0-9=-@+?[?]?<?>._]*"
+    ConstraintDescription: Can contain only ASCII characters.
+  Subnet1Cidr:
+    Description: CIDR Block for the  pubulic subnet 1
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 10.1.64.0/24
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be like 10.1.1.0/24
+  #---
+  Subnet2Name:
+    Description: Name for the Public Subnet 2
+    Type: String
+    Default: PublicSub2
+    AllowedPattern: "[a-zA-Z0-9=-@+?[?]?<?>._]*"
+    ConstraintDescription: Can contain only ASCII characters.
+  Subnet2Cidr:
+    Description: CIDR Block for the  pubulic subnet 2
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 10.1.128.0/24
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be like 10.1.1.0/24
+  #------------------
+  InstanceType:
+    Description: Instance type
+    Type: String
+    Default: m5.8xlarge
+  AmiId:
+    Description: AMI ID
+    Type: String
+    Default: ami-0310e62011e175a3a
+  KeyName:
+    Type: String 
+  #------------------
+  RdsDbname:
+    Type: String
+    Default: SnapshotTestDB
+  RdsMasterUsername:
+    Type: String
+    Default: testadmin
+  RdsMasterUserPassword:
+    Type: String
+  RdsEngineVersion:
+    Type: String
+    Default: 11.6
+  RdsDBInstanceClass:
+    Type: String
+    Default: db.m5.8xlarge
+  RdsAllocatedStorage:
+    Description: Allocated Storage Size(GB)
+    Type: Number
+    Default: 1500
+    MaxValue: 10000
+    MinValue: 100
+  #------------------
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      -
+        Label:
+          default: "VPC Configurations"
+        Parameters:
+          - InternetAccess
+          - VpcInternalDnsName
+          - VpcName
+          - VpcCidr
+          - DnsSupport
+          - DnsHostnames
+      -
+        Label:
+          default: "Subnets Configurations"
+        Parameters:
+          - Subnet1Name
+          - Subnet1Cidr
+          - Subnet2Name
+          - Subnet2Cidr
+      -
+        Label:
+          default: "Instances"
+        Parameters:
+          - InstanceType
+          - AmiId
+          - KeyName
+      -
+        Label:
+          default: "Rds"
+        Parameters:
+          - RdsDbname
+          - RdsMasterUsername
+          - RdsMasterUserPassword
+          - RdsEngineVersion
+          - RdsDBInstanceClass
+          - RdsAllocatedStorage
+#----------------------------------------------
+Conditions: 
+  CheckInternetAccess: !Equals [ !Ref InternetAccess, true ]
+#----------------------------------------------
+Resources:
+  #------------------ VPC FlowLog Role
+  FlowlogRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "Flowlog"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: Allow
+                Action: 
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+  #------------------ VPC
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: !Ref DnsSupport
+      EnableDnsHostnames: !Ref DnsHostnames
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcName}
+  #------------------ Internet GW
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Condition: CheckInternetAccess
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcName}-IGW
+  AttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CheckInternetAccess
+    Properties:
+      InternetGatewayId: !Ref Igw
+      VpcId: !Ref Vpc
+    DependsOn:
+      - Vpc
+      - Igw
+  #------------------ Subnet
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet1Cidr
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select
+      - 0
+      - Fn::GetAZs: !Ref 'AWS::Region'
+      MapPublicIpOnLaunch:
+        Fn::If:
+          - CheckInternetAccess
+          - true
+          - false
+      Tags:
+        - Key: Name
+          Value: !Sub ${Subnet1Name}
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet2Cidr
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select
+      - 1
+      - Fn::GetAZs: !Ref 'AWS::Region'
+      MapPublicIpOnLaunch:
+        Fn::If:
+          - CheckInternetAccess
+          - true
+          - false
+      Tags:
+        - Key: Name
+          Value: !Sub ${Subnet2Name}
+  #------------------ Route Table
+  #----------  VPC Public Route Table
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${VpcName}-RouteTable
+  VpcInternetRote:
+    Type: AWS::EC2::Route
+    Condition: CheckInternetAccess
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+    DependsOn:
+      - AttachIgw
+  #---- Attache to subnets in the  VPC
+  RouteTableAssociationSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref RouteTable
+  RouteTableAssociationSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref RouteTable
+  #------------------ Local Domain Name
+  VpcInternalDns:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: "Resource DNS for  VPC"
+      Name: !Ref VpcInternalDnsName
+      VPCs:
+        - VPCId: !Ref Vpc
+          VPCRegion: !Ref AWS::Region
+  #------------------ Cloudwatch log for Flowlog
+  VPCFlowlog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowlogRole.Arn
+      LogGroupName: !Sub VPCFlowLogs/${VpcName}
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+  #------------------ IAM Role for Test Instance 
+  Ec2TestInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+  TestInstanceRoleProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "Ec2TestInstanceRoleProfile${AWS::StackName}"
+      Path: "/"
+      Roles:
+        - !Ref Ec2TestInstanceRole
+  #------------------ Security Group
+  Ec2InstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Limits security group Ingress traffic
+      SecurityGroupIngress:
+        - Description: "Ssh"
+          CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+      VpcId: !Ref Vpc
+  RDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Limits security group Ingress traffic for RDS
+      SecurityGroupIngress:
+        - Description: "PosgreSQL"
+          SourceSecurityGroupId: !Ref Ec2InstanceSG
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+      VpcId: !Ref Vpc
+  #------------------ Instances
+  Ec2TestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub ${AmiId}
+      InstanceType: !Sub ${InstanceType}
+      IamInstanceProfile: !Ref TestInstanceRoleProfile
+      Monitoring: yes
+      KeyName: !Ref KeyName
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          SubnetId: !Ref Subnet1
+          GroupSet:
+            - !Ref Ec2InstanceSG
+          AssociatePublicIpAddress: true
+      Tags:
+        - Key: Name
+          Value: Test-Instance
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Update ALL rpms, and change hostname to Userfrendly name 
+          yum -y update
+          hostnamectl set-hostname "Test-Instance"
+          # install tool
+          yum -y install git postgresql
+
+          reboot
+  #------------------ RDS
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: ${AWS::StackName}-RDS-PosgreSqlDbSubnet
+      SubnetIds:
+        - !Ref Subnet1
+        - !Ref Subnet2
+  DBInstance:
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Type: AWS::RDS::DBInstance
+    Properties:
+      #DB Basinc setting
+      DBName: !Ref RdsDbname
+      MasterUsername: !Ref RdsMasterUsername
+      MasterUserPassword: !Ref RdsMasterUserPassword
+      Engine: postgres
+      EngineVersion: !Ref RdsEngineVersion
+      #DB Instance setting
+      DBInstanceClass: !Ref RdsDBInstanceClass
+      #Multi-AZs and network setting
+      MultiAZ: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+      - !Ref RDSSG
+      # Storage setting
+      AllocatedStorage: !Ref RdsAllocatedStorage
+      StorageType: gp2
+      StorageEncrypted: true
+      #Mantainances
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 0
+      CopyTagsToSnapshot: true
+  # Dynamodb for storing Result data
+
+
+Outputs:
+  #------------------ VPC
+  VpcId:
+    Description:  VPC ID
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
+  VpcCidr:
+    Description:  VPC CIDR
+    Value: !Ref VpcCidr
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcCidr"
+  #------------------ Subnet
+  Subnet1Id:
+    Description: Public Subnet1 ID in the  VPC
+    Value: !Ref Subnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-Subnet1Id"
+  Subnet2Id:
+    Description: Public Subnet2 ID in the  VPC
+    Value: !Ref Subnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-Subnet2Id"
+  #------------------ route tables
+  RouteTableId:
+    Description: Route table for Public Subnet
+    Value: !Ref RouteTable
+    Export:
+      Name: !Sub "${AWS::StackName}-RouteTableId"
+  #------------------ Resource DNS name
+  VpcInternalDnsName:
+    Description: Resource DNS zone name in the  Vpc
+    Value: !Ref VpcInternalDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcInternalDnsName
+  VpcInternalDnsId:
+    Description: Resource DNS zone id in the  VPC
+    Value: !Ref VpcInternalDns
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcInternalDnsId
+  #------------------ Instances
+  InstancePublicIp:
+    Description: Public IP of Instance
+    Value: !GetAtt Ec2TestInstance.PublicIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePublicIp
+  RdsAddress:
+    Description: endpoint of rds
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsAddress
+  RdsPort:
+    Description: endpoint of rds
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsPort
+  RdsUsername:
+    Description: user name of RDS
+    Value: !Ref RdsMasterUsername
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsUsername
+  RdsMasterUserPassword:
+    Description: user name of RDS
+    Value: !Ref RdsMasterUserPassword
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsMasterUserPassword
+  RdsDBName:
+    Description: RdsDBName
+    Value: !Ref RdsDbname
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsDBName
+  RdsId:
+    Description: ID of RDS(Posgresql)
+    Value: !Ref DBInstance
+    Export:
+      Name: !Sub ${AWS::StackName}-RdsId
+  DynamoDBResultTable:
+    Value: RdsSnapshotResultDataTable
+    Export:
+      Name: !Sub ${AWS::StackName}-DynamoDBResultTable
